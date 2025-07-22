@@ -1,17 +1,41 @@
 defmodule ExGitManager.IssueDeleter do
   @moduledoc """
-  Provides functionality to interact with GitHub issues via the REST API.
+  Provides functionality to interact with GitHub issues via REST and GraphQL APIs.
 
   Note: GitHub's REST API does not support direct deletion of issues.
-  Issues can only be closed via PATCH or deleted via GraphQL API.
+  Issues can be closed via PATCH (REST) or truly deleted via GraphQL API.
   """
 
   require Logger
 
   @github_api_base_url "https://api.github.com"
+  @github_graphql_url "https://api.github.com/graphql"
 
   @doc """
-  Fetches all issues from a GitHub repository.
+  Fetches all issues from a GitHub repository using GraphQL API.
+
+  Returns a list of maps with issue numbers and node IDs for GraphQL operations.
+  Only fetches open issues by default.
+
+  ## Examples
+
+      ExGitManager.IssueDeleter.fetch_all_issues_graphql("owner", "repo_name")
+      # => {:ok, [%{number: 1, node_id: "I_kwD..."}, %{number: 2, node_id: "I_kwD..."}]}
+  """
+  def fetch_all_issues_graphql(owner, repo_name, opts \\ [])
+      when is_binary(owner) and is_binary(repo_name) do
+    state = Keyword.get(opts, :state, "OPEN")
+    first = Keyword.get(opts, :first, 100)
+
+    with {:ok, github_token} <- get_github_token() do
+      fetch_issues_graphql_paginated(owner, repo_name, github_token, state, first, nil, [])
+    else
+      {:error, :github_token_missing} = error -> error
+    end
+  end
+
+  @doc """
+  Fetches all issues from a GitHub repository using REST API.
 
   Returns a list of issue numbers for the repository.
   Only fetches open issues by default.
@@ -33,12 +57,137 @@ defmodule ExGitManager.IssueDeleter do
     end
   end
 
-  @doc """
-  Deletes all issues from a GitHub repository.
+@doc """
+  Debug function to test GraphQL connectivity and see what issues exist.
+  
+  ## Examples
+  
+      ExGitManager.IssueDeleter.debug_issues("owner", "repo_name")
+  """
+  def debug_issues(owner, repo_name) when is_binary(owner) and is_binary(repo_name) do
+    Logger.info("Checking for issues in #{owner}/#{repo_name}...")
+    
+    Logger.info("Fetching OPEN issues via GraphQL:")
+    case fetch_all_issues_graphql(owner, repo_name, state: "OPEN") do
+      {:ok, issues} -> Logger.info("Found #{length(issues)} OPEN issues: #{inspect(issues)}")
+      {:error, error} -> Logger.error("Error fetching OPEN issues: #{inspect(error)}")
+    end
+    
+    Logger.info("Fetching CLOSED issues via GraphQL:")
+    case fetch_all_issues_graphql(owner, repo_name, state: "CLOSED") do
+      {:ok, issues} -> Logger.info("Found #{length(issues)} CLOSED issues: #{inspect(issues)}")
+      {:error, error} -> Logger.error("Error fetching CLOSED issues: #{inspect(error)}")
+    end
+    
+    Logger.info("Fetching ALL issues via GraphQL:")
+    case fetch_all_issues_graphql(owner, repo_name, state: "ALL") do
+      {:ok, issues} -> Logger.info("Found #{length(issues)} ALL issues: #{inspect(issues)}")
+      {:error, error} -> Logger.error("Error fetching ALL issues: #{inspect(error)}")
+    end
+    
+    Logger.info("Fetching issues via REST API (for comparison):")
+    case fetch_all_issues(owner, repo_name, state: "all") do
+      {:ok, issues} -> Logger.info("Found #{length(issues)} issues via REST: #{inspect(issues)}")
+      {:error, error} -> Logger.error("Error fetching via REST: #{inspect(error)}")
+    end
+    
+    :ok
+  end
 
-  **WARNING**: This will attempt to delete ALL issues in the repository.
-  Since GitHub's REST API doesn't support issue deletion, this will actually
-  close all issues instead.
+  @doc """
+  Truly deletes an issue using GitHub's GraphQL API.
+
+  ## Examples
+
+      ExGitManager.IssueDeleter.delete_issue_graphql("I_kwDOIV8V6M5WM_mv")
+  """
+  def delete_issue_graphql(issue_node_id) when is_binary(issue_node_id) do
+    with {:ok, github_token} <- get_github_token() do
+      mutation = """
+      mutation($issueId: ID!) {
+        deleteIssue(input: {
+          issueId: $issueId
+        }) {
+          repository {
+            id
+          }
+        }
+      }
+      """
+
+      headers = build_graphql_headers(github_token)
+      body = Jason.encode!(%{
+        query: mutation,
+        variables: %{issueId: issue_node_id}
+      })
+
+      case Finch.build(:post, @github_graphql_url, headers, body)
+           |> Finch.request(ExGitManager.Finch) do
+        {:ok, %{status: 200, body: response_body}} ->
+          case Jason.decode(response_body) do
+            {:ok, %{"data" => %{"deleteIssue" => _}}} ->
+              :ok
+
+            {:ok, %{"errors" => errors}} ->
+              error_msg = errors |> Enum.map(& &1["message"]) |> Enum.join(", ")
+              Logger.error("GraphQL error deleting issue: #{error_msg}")
+              {:error, error_msg}
+
+            {:error, _} ->
+              {:error, "Failed to parse GraphQL response"}
+          end
+
+        {:ok, %{status: status, body: response_body}} ->
+          Logger.error("GraphQL request failed with status #{status}: #{response_body}")
+          {:error, "HTTP #{status}"}
+
+        {:error, reason} ->
+          Logger.error("Network error in GraphQL request: #{inspect(reason)}")
+          {:error, reason}
+      end
+    else
+      {:error, :github_token_missing} = error -> error
+    end
+  end
+
+  @doc """
+  Deletes all issues from a GitHub repository using GraphQL API for true deletion.
+
+  **WARNING**: This will PERMANENTLY DELETE ALL issues in the repository.
+  This operation cannot be undone!
+
+  ## Examples
+
+      # Delete all open issues (PERMANENT)
+      ExGitManager.IssueDeleter.delete_all_issues_graphql("owner", "repo_name")
+      
+      # Delete all issues (PERMANENT)
+      ExGitManager.IssueDeleter.delete_all_issues_graphql("owner", "repo_name", state: "all")
+      
+      # Debug what issues exist
+      ExGitManager.IssueDeleter.debug_issues("owner", "repo_name")
+  """
+  def delete_all_issues_graphql(owner, repo_name, opts \\ [])
+      when is_binary(owner) and is_binary(repo_name) do
+    Logger.warning("DANGER: This will PERMANENTLY DELETE ALL issues in #{owner}/#{repo_name}")
+    Logger.warning("This operation CANNOT BE UNDONE!")
+    Logger.info("Type 'DELETE' and press Enter to continue, or Ctrl+C to cancel...")
+
+    case IO.read(:line) |> String.trim() do
+      "DELETE" ->
+        proceed_with_graphql_deletion(owner, repo_name, opts)
+
+      _ ->
+        Logger.info("Operation cancelled.")
+        {:ok, :cancelled}
+    end
+  end
+
+  @doc """
+  Deletes all issues from a GitHub repository (closes via REST API).
+
+  **WARNING**: This will attempt to close ALL issues in the repository.
+  Uses REST API which can only close issues, not delete them.
 
   ## Examples
 
@@ -295,6 +444,153 @@ defmodule ExGitManager.IssueDeleter do
       {:error, reason} ->
         {:error, "Network error: #{inspect(reason)}"}
     end
+  end
+
+  defp proceed_with_graphql_deletion(owner, repo_name, opts) do
+    state_param =
+      case Keyword.get(opts, :state, "open") do
+        "all" -> "ALL"
+        "closed" -> "CLOSED"
+        _ -> "OPEN"
+      end
+
+    with {:ok, issues} <- fetch_all_issues_graphql(owner, repo_name, state: state_param) do
+      if Enum.empty?(issues) do
+        Logger.info("No issues found in #{owner}/#{repo_name}")
+        {:ok, []}
+      else
+        Logger.info("Found #{length(issues)} issues. Starting PERMANENT deletion process...")
+
+        results =
+          issues
+          |> Enum.with_index(1)
+          |> Enum.map(fn {%{number: issue_number, node_id: node_id}, index} ->
+            Logger.info(
+              "[#{index}/#{length(issues)}] Permanently deleting issue ##{issue_number}"
+            )
+
+            result = delete_issue_graphql(node_id)
+
+            # Add delay to respect rate limits
+            :timer.sleep(1000)
+
+            {issue_number, result}
+          end)
+
+        successful = Enum.count(results, fn {_, result} -> result == :ok end)
+        failed = length(results) - successful
+
+        Logger.info("Summary:")
+        Logger.info("Successfully deleted: #{successful}")
+        Logger.info("Failed: #{failed}")
+
+        {:ok, results}
+      end
+    else
+      error -> error
+    end
+  end
+
+  defp fetch_issues_graphql_paginated(owner, repo_name, github_token, state, first, cursor, acc) do
+    {query, variables} = build_issues_query(owner, repo_name, state, first, cursor)
+    
+    request_body = %{
+      query: query,
+      variables: variables
+    }
+
+    headers = build_graphql_headers(github_token)
+    body = Jason.encode!(request_body)
+
+    case Finch.build(:post, @github_graphql_url, headers, body)
+         |> Finch.request(ExGitManager.Finch) do
+      {:ok, %{status: 200, body: response_body}} ->
+        case Jason.decode(response_body) do
+          {:ok, %{"data" => %{"repository" => %{"issues" => issues_data}}}} ->
+            issues =
+              issues_data["nodes"]
+              |> Enum.map(fn issue ->
+                %{number: issue["number"], node_id: issue["id"]}
+              end)
+
+            new_acc = acc ++ issues
+
+            # Check if there are more pages
+            if issues_data["pageInfo"]["hasNextPage"] do
+              next_cursor = issues_data["pageInfo"]["endCursor"]
+
+              fetch_issues_graphql_paginated(
+                owner,
+                repo_name,
+                github_token,
+                state,
+                first,
+                next_cursor,
+                new_acc
+              )
+            else
+              {:ok, new_acc}
+            end
+
+          {:ok, %{"errors" => errors}} ->
+            error_msg = errors |> Enum.map(& &1["message"]) |> Enum.join(", ")
+            {:error, "GraphQL errors: #{error_msg}"}
+
+          {:error, _} ->
+            {:error, "Failed to parse GraphQL response"}
+        end
+
+      {:ok, %{status: status, body: response_body}} ->
+        {:error, "GraphQL request failed: HTTP #{status} - #{response_body}"}
+
+      {:error, reason} ->
+        {:error, "Network error: #{inspect(reason)}"}
+    end
+  end
+
+  defp build_issues_query(owner, repo_name, state, first, cursor) do
+    query = """
+    query($owner: String!, $repo: String!, $state: [IssueState!], $first: Int!, $after: String) {
+      repository(owner: $owner, name: $repo) {
+        issues(states: $state, first: $first, after: $after) {
+          pageInfo {
+            hasNextPage
+            endCursor
+          }
+          nodes {
+            number
+            id
+          }
+        }
+      }
+    }
+    """
+    
+    # Convert state string to proper GraphQL enum format
+    state_list = case state do
+      "OPEN" -> ["OPEN"]
+      "CLOSED" -> ["CLOSED"]
+      "ALL" -> ["OPEN", "CLOSED"]
+      _ -> ["OPEN"]
+    end
+    
+    variables = %{
+      owner: owner,
+      repo: repo_name,
+      state: state_list,
+      first: first,
+      after: cursor
+    }
+    
+    {query, variables}
+  end
+
+  defp build_graphql_headers(token) do
+    [
+      {"Content-Type", "application/json"},
+      {"Authorization", "Bearer #{token}"},
+      {"Accept", "application/vnd.github+json"}
+    ]
   end
 
   defp build_headers(token) do

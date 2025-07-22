@@ -16,13 +16,22 @@ defmodule ExGitManager do
       # Delete a repository
       ExGitManager.RepoDeleter.delete_repo("owner", "repo_name")
       
-      # Interact with an issue (note: deletion not supported by REST API)
+      # Close an issue (REST API - doesn't truly delete)
       ExGitManager.IssueDeleter.delete_issue("owner", "repo_name", 123)
       
-      # Delete all issues in a repository (actually closes them)
+      # Close all issues in a repository (REST API)
       ExGitManager.IssueDeleter.delete_all_issues("owner", "repo_name")
       
-      # Fetch all issues from a repository
+      # PERMANENTLY delete an issue (GraphQL API)
+      ExGitManager.IssueDeleter.delete_issue_graphql("I_kwDOIV8V6M5WM_mv")
+      
+      # PERMANENTLY delete all issues (GraphQL API) 
+      ExGitManager.IssueDeleter.delete_all_issues_graphql("owner", "repo_name")
+      
+      # Fetch all issues from a repository (REST API)
       ExGitManager.IssueDeleter.fetch_all_issues("owner", "repo_name")
+      
+      # Fetch all issues with GraphQL node IDs
+      ExGitManager.IssueDeleter.fetch_all_issues_graphql("owner", "repo_name")
   """
 end

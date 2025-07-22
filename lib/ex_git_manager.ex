@@ -18,5 +18,11 @@ defmodule ExGitManager do
       
       # Interact with an issue (note: deletion not supported by REST API)
       ExGitManager.IssueDeleter.delete_issue("owner", "repo_name", 123)
+      
+      # Delete all issues in a repository (actually closes them)
+      ExGitManager.IssueDeleter.delete_all_issues("owner", "repo_name")
+      
+      # Fetch all issues from a repository
+      ExGitManager.IssueDeleter.fetch_all_issues("owner", "repo_name")
   """
 end

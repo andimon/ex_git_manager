@@ -5,6 +5,8 @@ defmodule ExGitManager.RepoDeleter do
   Requires appropriate GitHub token permissions for repository deletion.
   """
 
+  require Logger
+
   @github_api_base_url "https://api.github.com"
 
   @doc """
@@ -41,11 +43,11 @@ defmodule ExGitManager.RepoDeleter do
       headers = build_headers(github_token)
 
       url = "#{@github_api_base_url}/repos/#{owner}/#{repo_name}"
-      IO.puts("Attempting to delete repository: #{owner}/#{repo_name}")
+      Logger.info("Attempting to delete repository: #{owner}/#{repo_name}")
 
       case Finch.build(:delete, url, headers) |> Finch.request(ExGitManager.Finch) do
         {:ok, %{status: 204}} ->
-          IO.puts("✅ Repository '#{owner}/#{repo_name}' deleted successfully.")
+          Logger.info("Repository '#{owner}/#{repo_name}' deleted successfully.")
           :ok
 
         {:ok, %{status: status, body: body}} ->
@@ -55,24 +57,22 @@ defmodule ExGitManager.RepoDeleter do
               _ -> "Could not parse error message from response body."
             end
 
-          IO.puts(:stderr, "❌ Failed to delete repository '#{owner}/#{repo_name}'.")
-          IO.puts(:stderr, "Status: #{status}, Error: #{error_message}")
+          Logger.error("Failed to delete repository '#{owner}/#{repo_name}'.")
+          Logger.error("Status: #{status}, Error: #{error_message}")
           {:error, %{status: status, message: error_message}}
 
         {:error, reason} ->
-          IO.puts(
-            :stderr,
-            "❌ Network or Finch error while deleting '#{owner}/#{repo_name}': #{inspect(reason)}"
+          Logger.error(
+            "Network or Finch error while deleting '#{owner}/#{repo_name}': #{inspect(reason)}"
           )
 
           {:error, reason}
       end
     else
       {:error, :github_token_missing} ->
-        IO.puts(:stderr, "❌ Error: GITHUB_TOKEN environment variable is not set.")
+        Logger.error("Error: GITHUB_TOKEN environment variable is not set.")
 
-        IO.puts(
-          :stderr,
+        Logger.error(
           "Please set it with your GitHub Personal Access Token (PAT) that has 'delete_repo' scope."
         )
 
